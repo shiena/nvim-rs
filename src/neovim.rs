@@ -316,10 +316,8 @@ where
           let writer = self.writer.clone();
 
           handler.spawn(async move {
-            let response = match handler_c
-              .handle_request(method, params, neovim)
-              .await
-              {
+            let response =
+              match handler_c.handle_request(method, params, neovim).await {
                 Ok(result) => RpcMessage::RpcResponse {
                   msgid,
                   result,
@@ -332,17 +330,14 @@ where
                 },
               };
 
-            model::encode(writer, response)
-              .await
-              .unwrap_or_else(|e| {
-                error!("Error sending response to request {}: '{}'", msgid, e);
-              });
+            model::encode(writer, response).await.unwrap_or_else(|e| {
+              error!("Error sending response to request {}: '{}'", msgid, e);
+            });
           });
-        },
-        RpcMessage::RpcNotification {
-          method,
-          params
-        } => handler.handle_notify(method, params, self.clone()).await,
+        }
+        RpcMessage::RpcNotification { method, params } => {
+          handler.handle_notify(method, params, self.clone()).await
+        }
         RpcMessage::RpcResponse { .. } => unreachable!(),
       }
     }
@@ -368,16 +363,22 @@ where
       };
 
       debug!("Get message {:?}", msg);
-      if let RpcMessage::RpcResponse { msgid, result, error, } = msg {
+      if let RpcMessage::RpcResponse {
+        msgid,
+        result,
+        error,
+      } = msg
+      {
         let sender = find_sender(&self.queue, msgid).await?;
-        if error == Value::Nil {
-          sender
-            .send(Ok(Ok(result)))
-            .map_err(|r| (msgid, r.expect("This was an OK(_)")))?;
+        let response = if error == Value::Nil {
+          Ok(result)
         } else {
-          sender
-            .send(Ok(Err(error)))
-            .map_err(|r| (msgid, r.expect("This was an OK(_)")))?;
+          Err(error)
+        };
+        // A caller may have timed out after sending its request. Consume the
+        // late response without disconnecting other callers or notifications.
+        if sender.send(Ok(response)).is_err() {
+          debug!("Discarding response to cancelled request {}", msgid);
         }
       } else {
         // Send message to handler_loop()
@@ -432,6 +433,56 @@ async fn find_sender(
 #[cfg(all(test, feature = "use_tokio"))]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn late_responses_after_timeout_preserve_connection() {
+    use std::time::Duration;
+
+    for error in [Value::Nil, Value::from("late error")] {
+      let nvim = Neovim {
+        writer: Arc::new(Mutex::new(futures::io::sink())),
+        queue: Arc::new(Mutex::new(Vec::new())),
+        msgid_counter: Arc::new(AtomicU64::new(0)),
+      };
+      // Time out only after the complete request has been written.
+      let cancelled = nvim.send_msg("slow", vec![]).await.unwrap();
+      assert!(tokio::time::timeout(Duration::from_millis(1), cancelled)
+        .await
+        .is_err());
+      let active = nvim.send_msg("next", vec![]).await.unwrap();
+      let mut wire = Vec::new();
+      for message in [
+        RpcMessage::RpcResponse {
+          msgid: 0,
+          error,
+          result: Value::Nil,
+        },
+        RpcMessage::RpcResponse {
+          msgid: 1,
+          error: Value::Nil,
+          result: Value::from(42),
+        },
+        RpcMessage::RpcNotification {
+          method: "redraw".into(),
+          params: vec![],
+        },
+      ] {
+        model::encode_sync(&mut wire, message).unwrap();
+      }
+      let (tx, mut rx) = unbounded();
+      // EOF ends this finite stream, but both replies and the notification
+      // must have been processed before the connection reports EOF.
+      let end = nvim
+        .clone()
+        .io_loop(futures::io::Cursor::new(wire), tx)
+        .await;
+      assert!(matches!(*end.unwrap_err(), LoopError::DecodeError(..)));
+      assert_eq!(active.await.unwrap().unwrap().unwrap(), Value::from(42));
+      assert!(matches!(rx.next().await,
+        Some(RpcMessage::RpcNotification { method, .. }) if method == "redraw"));
+      assert!(nvim.queue.lock().await.is_empty());
+    }
+  }
 
   #[tokio::test]
   async fn test_find_sender() {
