@@ -18,6 +18,36 @@ use common::*;
 
 use nvim_rs::error::HandshakeError;
 
+#[tokio::test]
+async fn handshake_preserves_special_characters() {
+  for message in [
+    "plain",
+    "single'quote",
+    "double\"quote",
+    "back\\slash",
+    "line\nbreak",
+  ] {
+    let mut command = Command::new(nvim_path());
+    command.args(["-u", "NONE", "--embed"]).kill_on_drop(true);
+    let (_, io, mut child) = tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      create::new_child_handshake_cmd(
+        &mut command,
+        DummyHandler::new(),
+        message,
+      ),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("Handshake timed out for {message:?}"))
+    .unwrap_or_else(|error| {
+      panic!("Handshake failed for {message:?}: {error}")
+    });
+    child.kill().await.unwrap();
+    io.abort();
+    let _ = io.await;
+  }
+}
+
 atest!{
 async fn successful_handshake() {
   let handler = DummyHandler::new();
