@@ -204,7 +204,7 @@ where
     let req = RpcMessage::RpcRequest {
       msgid,
       method: "nvim_exec_lua".to_owned(),
-      params: call_args![format!("return '{message}'"), Vec::<Value>::new()],
+      params: call_args!["return ...", vec![Value::from(message)]],
     };
     instance.write_message(req, None).await?;
 

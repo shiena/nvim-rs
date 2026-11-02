@@ -90,7 +90,7 @@ async fn unsuccessful_handshake_with_wrong_output() {
   let handler = DummyHandler::new();
 
   // NOTE: This has to match the exact length of the message sent
-  let expected_request_len = 46;
+  let expected_request_len = 48;
 
   // Make sure that the command is alive for long enough by reading the request
   // message from stdin with dd
